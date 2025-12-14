@@ -1,0 +1,4 @@
+{
+    "keep_days": 365,
+    "max_workers": 3
+}
