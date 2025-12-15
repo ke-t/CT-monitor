@@ -1,7 +1,8 @@
 import csv
 import os
 import time
-import requests  # ← NUEVO: Para el type hint requests.Session
+import requests
+import sys
 from typing import Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
@@ -15,10 +16,11 @@ except ImportError:
 
 from api_utils import create_session
 from card_processor import process_single_card
+from scheduler import get_wishlist_id, run_scheduler
 
 # Directorios
 OUTPUTS_DIR = 'outputs'
-MAX_WORKERS = 3  # ← Ajusta: 3-5 para balance velocidad/seguridad
+MAX_WORKERS = 3  # Ajusta: 3-5 para balance velocidad/seguridad
 
 def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str, exp_map: Dict[str, Any]) -> int:
     """Procesa una wishlist individual y devuelve el número de resultados."""
@@ -79,63 +81,78 @@ def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str,
         print(f"No resultados para {wishlist_id}.")
         return 0
 
-def main():
+def processing_func(wishlist_id: str | None = None) -> int:
+    """Función principal de procesamiento: Maneja input, sesión, expansiones y wishlists."""
     load_dotenv()
     
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
     
-    # Leer token de var de entorno
+    # Leer token de var de entorno con fallback
     token = os.getenv('CARDTRADER_TOKEN')
     if not token:
-        print("Error: CARDTRADER_TOKEN no encontrado en .env. Crea el archivo y agrega tu token.")
-        return
+        token = input("CARDTRADER_TOKEN no encontrado en .env. Ingresa tu token: ").strip()
+        if not token:
+            print("Error: Token requerido.")
+            return 0
     
     session = create_session(token)
     base_url = 'https://api.cardtrader.com/api/v2'
     
     # Obtener expansiones (con delay para estabilidad)
-    time.sleep(2)  # ← Inicial para "calentar"
+    time.sleep(2)  # Inicial para "calentar"
     expansions_resp = session.get(f'{base_url}/expansions')
     if expansions_resp.status_code != 200:
         print(f"Error expansiones: {expansions_resp.status_code} - {expansions_resp.text[:100]}")
-        return
+        return 0
     expansions = expansions_resp.json()
     exp_map = {e['code'].lower(): e for e in expansions if e['game_id'] == 1}
     print(f"Expansiones: {len(exp_map)}")
     
-    # ← NUEVO: Input con opción para archivo
-    wishlist_id = input("ID de wishlist (o Enter para usar wishlists.txt): ").strip()
+    # Input con opción para archivo (bloqueante si None)
+    if wishlist_id is None:
+        wishlist_id = get_wishlist_id(block=True)
     
     total_processed = 0
     if not wishlist_id:
-        # ← NUEVO: Modo archivo
-        file_path = 'wishlists.txt'
+        # Modo archivo
+        file_path = 'wishlists'
         try:
             with open(file_path, 'r') as f:
-                wishlist_ids = [line.strip() for line in f if line.strip()]
+                wishlist_ids = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
         except FileNotFoundError:
             print(f"Error: No se encontró {file_path}. Crea el archivo con IDs de wishlists, uno por línea.")
-            return
+            return 0
         except Exception as e:
             print(f"Error al leer {file_path}: {e}")
-            return
+            return 0
         
         if not wishlist_ids:
             print(f"Archivo {file_path} vacío. Agrega IDs de wishlists.")
-            return
+            return 0
         
         print(f"Procesando {len(wishlist_ids)} wishlists desde {file_path}...")
-        for wid in wishlist_ids:  # ← NUEVO: Bucle en orden
+        for wid in wishlist_ids:
             processed = process_wishlist(wid, session, base_url, exp_map)
             total_processed += processed
             if processed == 0:
                 print(f"  Saltando {wid} (sin resultados o error).")
-            time.sleep(1)  # ← NUEVO: Pequeña pausa entre wishlists para estabilidad
+            time.sleep(1)  # Pequeña pausa entre wishlists para estabilidad
     else:
-        # ← NUEVO: Modo single (comportamiento original)
+        # Modo single
         total_processed = process_wishlist(wishlist_id, session, base_url, exp_map)
     
     print(f"\n¡Listo! Total de cartas procesadas: {total_processed}")
+    return total_processed
 
 if __name__ == "__main__":
-    main()
+    load_dotenv()
+    
+    # Lee intervalo de .env con fallback
+    interval_minutes = int(os.getenv('INTERVAL_MINUTES', 60))
+    
+    # Para ejecutar solo una vez (modo legacy)
+    if len(sys.argv) > 1 and sys.argv[1] == '--once':
+        processing_func()
+    else:
+        # Modo scheduler: Usa el intervalo de .env
+        run_scheduler(processing_func, interval_minutes=interval_minutes)
