@@ -1,14 +1,9 @@
 # Archivos sensibles (tokens y credenciales)
-tk
 telegram_token.txt
 telegram_chat_id.txt
 
 # Datos dinámicos y outputs (no versionar, ya que son generados)
-data/precios_historicos.db
-data/config.json  # Si contiene datos sensibles; si no, puedes incluirlo
 outputs/
-*.csv  # Todos los CSV generados
-*.html  # Todos los HTML generados
 
 # Archivos Python temporales
 __pycache__/
@@ -19,9 +14,6 @@ __pycache__/
 env/
 venv/
 .env
-
-# Entorno vistual Pyton
-mi_proyecto/
 
 # IDE y OS
 .vscode/settings.json  # Configs personales de VS Code
