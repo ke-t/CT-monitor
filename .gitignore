@@ -3,6 +3,7 @@ telegram_token.txt
 telegram_chat_id.txt
 
 # Datos dinámicos y outputs (no versionar, ya que son generados)
+historical/
 outputs/
 
 # Archivos Python temporales

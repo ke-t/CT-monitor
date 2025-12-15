@@ -17,6 +17,7 @@ except ImportError:
 from api_utils import create_session
 from card_processor import process_single_card
 from scheduler import get_wishlist_id, run_scheduler
+import historical_manager
 
 # Directorios
 OUTPUTS_DIR = 'outputs'
@@ -76,6 +77,17 @@ def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str,
             writer.writeheader()
             writer.writerows(results)
         print(f"Precios actuales en: {csv_file} ({len(results)} cartas)")
+        
+        # ACTUALIZAR HISTÓRICO
+        print("Actualizando histórico...")
+        for result in results:
+            card_name = result['nombre_carta']
+            price = float(result['precio_euros'])
+            historical_manager.update_historical(card_name, price)
+        
+        # Generar resumen histórico
+        historical_manager.generate_summary()
+        
         return len(results)
     else:
         print(f"No resultados para {wishlist_id}.")
