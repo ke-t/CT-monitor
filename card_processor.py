@@ -163,7 +163,7 @@ def process_single_card(item: Dict[str, Any], session: requests.Session, exp_map
     best = min(valid_products, key=sort_key)
     current_price = best['price']
     foil_icon = '🔶' if best['foil'] == 'Yes' else ''
-    flag = '🇪🇸' if best['language'] == 'ES' else '🇬🇧'
+    flag = '🇪🇸' if best['language'] == 'ES' else '🇺🇸'
     quality_abbr = 'NM' if best['quality'] == 'Near Mint' else 'SP'
 
     print(f"  Mejor: {card_slug} {flag} {quality_abbr} {foil_icon} - {current_price:.2f}€")

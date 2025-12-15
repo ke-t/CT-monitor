@@ -3,8 +3,9 @@ import os
 import time
 import requests
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from dotenv import load_dotenv
 
 try:
@@ -18,19 +19,20 @@ from api_utils import create_session
 from card_processor import process_single_card
 from scheduler import get_wishlist_id, run_scheduler
 import historical_manager
+from html_generator import generate_html
 
 # Directorios
 OUTPUTS_DIR = 'outputs'
 MAX_WORKERS = 3  # Ajusta: 3-5 para balance velocidad/seguridad
 
-def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str, exp_map: Dict[str, Any]) -> int:
-    """Procesa una wishlist individual y devuelve el número de resultados."""
+def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str, exp_map: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Procesa una wishlist individual y devuelve la lista de resultados."""
     print(f"\nObteniendo wishlist {wishlist_id}...")
     
     wishlist_resp = session.get(f"{base_url}/wishlists/{wishlist_id}")
     if wishlist_resp.status_code != 200:
         print(f"Error en wishlist {wishlist_id}: {wishlist_resp.status_code}")
-        return 0
+        return []
     
     wishlist = wishlist_resp.json()
     
@@ -68,30 +70,19 @@ def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str,
                 card_slug = item.get('meta_name', 'unknown')
                 print(f"Error en {card_slug}: {exc}")
     
-    # Output CSV para esta wishlist
-    if results:
-        csv_file = os.path.join(OUTPUTS_DIR, f"wishlist_{wishlist_id}_precios_actuales.csv")
-        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-            fieldnames = ['nombre_carta', 'expansion', 'codigo', 'idioma', 'calidad', 'foil', 'precio_euros']
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"Precios actuales en: {csv_file} ({len(results)} cartas)")
-        
-        # ACTUALIZAR HISTÓRICO
-        print("Actualizando histórico...")
-        for result in results:
-            card_name = result['nombre_carta']
-            price = float(result['precio_euros'])
-            historical_manager.update_historical(card_name, price)
-        
-        # Generar resumen histórico
-        historical_manager.generate_summary()
-        
-        return len(results)
-    else:
-        print(f"No resultados para {wishlist_id}.")
-        return 0
+    # Añadir wishlist_id a cada resultado y actualizar histórico
+    for result in results:
+        result['wishlist'] = wishlist_id
+        card_name = result['nombre_carta']
+        price = float(result['precio_euros'])
+        historical_manager.update_historical(card_name, price)
+    
+    print(f"  Encontrados {len(results)} productos válidos para {wishlist_id}")
+    
+    if not results:
+        print(f"  No resultados para {wishlist_id}.")
+    
+    return results
 
 def processing_func(wishlist_id: str | None = None) -> int:
     """Función principal de procesamiento: Maneja input, sesión, expansiones y wishlists."""
@@ -125,6 +116,8 @@ def processing_func(wishlist_id: str | None = None) -> int:
         wishlist_id = get_wishlist_id(block=True)
     
     total_processed = 0
+    all_results = []
+    
     if not wishlist_id:
         # Modo archivo
         file_path = 'wishlists'
@@ -144,14 +137,20 @@ def processing_func(wishlist_id: str | None = None) -> int:
         
         print(f"Procesando {len(wishlist_ids)} wishlists desde {file_path}...")
         for wid in wishlist_ids:
-            processed = process_wishlist(wid, session, base_url, exp_map)
-            total_processed += processed
-            if processed == 0:
-                print(f"  Saltando {wid} (sin resultados o error).")
+            results = process_wishlist(wid, session, base_url, exp_map)
+            all_results.extend(results)
+            total_processed += len(results)
             time.sleep(1)  # Pequeña pausa entre wishlists para estabilidad
     else:
         # Modo single
-        total_processed = process_wishlist(wishlist_id, session, base_url, exp_map)
+        results = process_wishlist(wishlist_id, session, base_url, exp_map)
+        all_results.extend(results)
+        total_processed = len(results)
+    
+    # Generar HTML y resumen histórico
+    if all_results:
+        html_path = generate_html(all_results)
+        historical_manager.generate_summary()
     
     print(f"\n¡Listo! Total de cartas procesadas: {total_processed}")
     return total_processed
