@@ -20,7 +20,6 @@ CT_REQUESTS = deque()  # Cola de timestamps
 def ct_rate_check():
     """Pausa si cerca del límite de CardTrader."""
     now = time.time()
-    # Limpia viejos
     while CT_REQUESTS and now - CT_REQUESTS[0] > CT_WINDOW:
         CT_REQUESTS.popleft()
     current_count = len(CT_REQUESTS)
@@ -35,7 +34,7 @@ def get_card_printings(card_slug: str, session: requests.Session) -> List[Dict[s
     card_name = preprocess_card_name(card_slug)
     search_url = f"https://api.scryfall.com/cards/named?fuzzy={card_name.replace(' ', '+')}"
     resp = session.get(search_url)
-    time.sleep(DELAY_SCRYFALL)  # ← Variable para burst safety
+    time.sleep(DELAY_SCRYFALL)
     if resp.status_code != 200:
         return []
     card_data = resp.json()
@@ -48,7 +47,7 @@ def get_card_printings(card_slug: str, session: requests.Session) -> List[Dict[s
     
     while next_page:
         resp = session.get(next_page)
-        time.sleep(DELAY_SCRYFALL)  # ← Variable extra por página
+        time.sleep(DELAY_SCRYFALL)
         if resp.status_code == 429:
             time.sleep(5)
             resp = session.get(next_page)
@@ -118,8 +117,8 @@ def process_single_card(item: Dict[str, Any], session: requests.Session, exp_map
         
         for lang in ['es', 'en']:
             for is_foil in [False, True]:
-                ct_rate_check()  # ← Limiter CT
-                time.sleep(DELAY_PRODUCTS)  # ← Variable reducido
+                ct_rate_check()
+                time.sleep(DELAY_PRODUCTS)
                 params = {'blueprint_id': blueprint_id, 'language': lang, 'foil': str(is_foil).lower()}
                 products_resp = session.get("https://api.cardtrader.com/api/v2/marketplace/products", params=params)
                 if products_resp.status_code != 200:
@@ -163,14 +162,18 @@ def process_single_card(item: Dict[str, Any], session: requests.Session, exp_map
     
     best = min(valid_products, key=sort_key)
     current_price = best['price']
-    print(f"  Mejor: {best['expansion']} {best['language']} {best['quality']} {best['foil']} - {current_price:.2f}€")
+    foil_icon = '🔶' if best['foil'] == 'Yes' else ''
+    flag = '🇪🇸' if best['language'] == 'ES' else '🇬🇧'
+    quality_abbr = 'NM' if best['quality'] == 'Near Mint' else 'SP'
+
+    print(f"  Mejor: {card_slug} {flag} {quality_abbr} {foil_icon} - {current_price:.2f}€")
     
     return {
         'nombre_carta': card_slug,
         'expansion': best['expansion'],
         'codigo': best['codigo'],
-        'idioma': best['language'],
-        'calidad': best['quality'],
-        'foil': best['foil'],
+        'idioma': flag,
+        'calidad': quality_abbr,
+        'foil': foil_icon,
         'precio_euros': f"{current_price:.2f}"
     }

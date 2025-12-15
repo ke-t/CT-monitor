@@ -1,6 +1,7 @@
 import csv
 import os
 import time
+import requests  # ← NUEVO: Para el type hint requests.Session
 from typing import Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
@@ -18,6 +19,65 @@ from card_processor import process_single_card
 # Directorios
 OUTPUTS_DIR = 'outputs'
 MAX_WORKERS = 3  # ← Ajusta: 3-5 para balance velocidad/seguridad
+
+def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str, exp_map: Dict[str, Any]) -> int:
+    """Procesa una wishlist individual y devuelve el número de resultados."""
+    print(f"\nObteniendo wishlist {wishlist_id}...")
+    
+    wishlist_resp = session.get(f"{base_url}/wishlists/{wishlist_id}")
+    if wishlist_resp.status_code != 200:
+        print(f"Error en wishlist {wishlist_id}: {wishlist_resp.status_code}")
+        return 0
+    
+    wishlist = wishlist_resp.json()
+    
+    # Items únicos
+    unique_items = {}
+    for item in wishlist['items']:
+        card_slug = item.get('meta_name')
+        if card_slug:
+            unique_items[card_slug] = item
+    
+    items_list = list(unique_items.values())
+    print(f"Procesando {len(items_list)} cartas con {MAX_WORKERS} workers...")
+    
+    # Multihilo: Submit tasks
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_item = {
+            executor.submit(process_single_card, item, session, exp_map): item 
+            for item in items_list
+        }
+        
+        # Progreso
+        if TQDM_AVAILABLE:
+            progress_iter = tqdm(as_completed(future_to_item), total=len(items_list), desc=f"Procesando cartas ({wishlist_id})")
+        else:
+            progress_iter = as_completed(future_to_item)
+        
+        for future in progress_iter:
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception as exc:
+                item = future_to_item[future]
+                card_slug = item.get('meta_name', 'unknown')
+                print(f"Error en {card_slug}: {exc}")
+    
+    # Output CSV para esta wishlist
+    if results:
+        csv_file = os.path.join(OUTPUTS_DIR, f"wishlist_{wishlist_id}_precios_actuales.csv")
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            fieldnames = ['nombre_carta', 'expansion', 'codigo', 'idioma', 'calidad', 'foil', 'precio_euros']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"Precios actuales en: {csv_file} ({len(results)} cartas)")
+        return len(results)
+    else:
+        print(f"No resultados para {wishlist_id}.")
+        return 0
 
 def main():
     load_dotenv()
@@ -43,64 +103,39 @@ def main():
     exp_map = {e['code'].lower(): e for e in expansions if e['game_id'] == 1}
     print(f"Expansiones: {len(exp_map)}")
     
-    # Wishlist ID
-    wishlist_id = input("ID de wishlist: ").strip()
+    # ← NUEVO: Input con opción para archivo
+    wishlist_id = input("ID de wishlist (o Enter para usar wishlists.txt): ").strip()
+    
+    total_processed = 0
     if not wishlist_id:
-        print("ID requerido.")
-        return
-    
-    # Obtener wishlist
-    wishlist_resp = session.get(f"{base_url}/wishlists/{wishlist_id}")
-    if wishlist_resp.status_code != 200:
-        print("Error wishlist.")
-        return
-    wishlist = wishlist_resp.json()
-    
-    # Items únicos
-    unique_items = {}
-    for item in wishlist['items']:
-        card_slug = item.get('meta_name')
-        if card_slug:
-            unique_items[card_slug] = item
-    
-    items_list = list(unique_items.values())
-    print(f"Procesando {len(items_list)} cartas con {MAX_WORKERS} workers...")
-    
-    # Multihilo: Submit tasks
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_item = {
-            executor.submit(process_single_card, item, session, exp_map): item 
-            for item in items_list
-        }
+        # ← NUEVO: Modo archivo
+        file_path = 'wishlists.txt'
+        try:
+            with open(file_path, 'r') as f:
+                wishlist_ids = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            print(f"Error: No se encontró {file_path}. Crea el archivo con IDs de wishlists, uno por línea.")
+            return
+        except Exception as e:
+            print(f"Error al leer {file_path}: {e}")
+            return
         
-        # Progreso
-        if TQDM_AVAILABLE:
-            progress_iter = tqdm(as_completed(future_to_item), total=len(items_list), desc="Procesando cartas")
-        else:
-            progress_iter = as_completed(future_to_item)
+        if not wishlist_ids:
+            print(f"Archivo {file_path} vacío. Agrega IDs de wishlists.")
+            return
         
-        for future in progress_iter:
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as exc:
-                item = future_to_item[future]
-                card_slug = item.get('meta_name', 'unknown')
-                print(f"Error en {card_slug}: {exc}")
-    
-    # Output CSV simple
-    if results:
-        csv_file = os.path.join(OUTPUTS_DIR, f"wishlist_{wishlist_id}_precios_actuales.csv")
-        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-            fieldnames = ['nombre_carta', 'expansion', 'codigo', 'idioma', 'calidad', 'foil', 'precio_euros']
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"\nPrecios actuales en: {csv_file} ({len(results)} cartas)")
+        print(f"Procesando {len(wishlist_ids)} wishlists desde {file_path}...")
+        for wid in wishlist_ids:  # ← NUEVO: Bucle en orden
+            processed = process_wishlist(wid, session, base_url, exp_map)
+            total_processed += processed
+            if processed == 0:
+                print(f"  Saltando {wid} (sin resultados o error).")
+            time.sleep(1)  # ← NUEVO: Pequeña pausa entre wishlists para estabilidad
     else:
-        print("No resultados.")
+        # ← NUEVO: Modo single (comportamiento original)
+        total_processed = process_wishlist(wishlist_id, session, base_url, exp_map)
+    
+    print(f"\n¡Listo! Total de cartas procesadas: {total_processed}")
 
 if __name__ == "__main__":
     main()
