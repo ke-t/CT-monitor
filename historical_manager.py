@@ -2,7 +2,6 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import List, Dict
-import csv  # Solo para escribir el summary CSV
 
 DB_PATH = os.path.join('outputs', 'historical.db')
 
@@ -54,58 +53,56 @@ def update_historical(card_name: str, price: float):
     conn.commit()
     conn.close()
 
-def generate_summary():
+def get_all_stats() -> Dict[str, Dict[str, float]]:
     """
-    Genera CSV de resumen con stats históricas por carta.
+    Carga todas las stats históricas por carta de forma eficiente.
     """
     _init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Query para stats por carta
-    cursor.execute('''
-        SELECT 
-            card_name,
-            MIN(price) as min_p,
-            MAX(price) as max_p
-        FROM prices
-        GROUP BY card_name
-        HAVING COUNT(*) > 0
-        ORDER BY card_name
-    ''')
-    
-    rows = cursor.fetchall()
-    summary_file = os.path.join('outputs', 'historical_summary.csv')
-    
-    with open(summary_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['nombre', 'min', 'max', 'Q1', 'dif-max', '% max', '€'])
-        
-        for row in rows:
-            card_name, min_p, max_p = row
-            
-            # Q1 y current en Python (simple, sin dependencias)
-            cursor.execute('SELECT price FROM prices WHERE card_name = ? ORDER BY date', (card_name,))
-            prices_list = [r[0] for r in cursor.fetchall()]
-            if not prices_list:
-                continue
-            sorted_prices = sorted(prices_list)
-            n = len(sorted_prices)
-            q1 = sorted_prices[int(n * 0.25)] if n > 0 else 0.0
-            current = prices_list[-1]
-            
-            dif_max = current - max_p
-            pct_max = (current / max_p * 100) if max_p > 0 else 0.0
-            
-            writer.writerow([
-                card_name,
-                f"{min_p:.2f}",
-                f"{max_p:.2f}",
-                f"{q1:.2f}",
-                f"{dif_max:.2f}",
-                f"{pct_max:.2f}",
-                f"{current:.2f}"
-            ])
-    
+    cursor.execute('SELECT card_name, price, date FROM prices ORDER BY card_name, date')
+    all_data = cursor.fetchall()
     conn.close()
-    print(f"Resumen histórico generado: {summary_file} ({len(rows)} cartas)")
+    
+    stats = {}
+    current_card = None
+    prices_list = []
+    
+    for row in all_data:
+        card, price, _ = row  # No usamos date aquí
+        if card != current_card:
+            if current_card and prices_list:
+                sorted_prices = sorted(prices_list)
+                n = len(sorted_prices)
+                min_p = min(sorted_prices)
+                max_p = max(sorted_prices)
+                q1 = sorted_prices[int(n * 0.25)] if n > 0 else 0.0
+                current = prices_list[-1]
+                dif_max = current - max_p
+                pct_max = (current / max_p * 100) if max_p > 0 else 0.0
+                stats[current_card] = {
+                    'min': min_p, 'max': max_p, 'q1': q1,
+                    'dif_max': dif_max, 'pct_max': pct_max, 'current': current
+                }
+            current_card = card
+            prices_list = [price]
+        else:
+            prices_list.append(price)
+    
+    # Última carta
+    if current_card and prices_list:
+        sorted_prices = sorted(prices_list)
+        n = len(sorted_prices)
+        min_p = min(sorted_prices)
+        max_p = max(sorted_prices)
+        q1 = sorted_prices[int(n * 0.25)] if n > 0 else 0.0
+        current = prices_list[-1]
+        dif_max = current - max_p
+        pct_max = (current / max_p * 100) if max_p > 0 else 0.0
+        stats[current_card] = {
+            'min': min_p, 'max': max_p, 'q1': q1,
+            'dif_max': dif_max, 'pct_max': pct_max, 'current': current
+        }
+    
+    return stats

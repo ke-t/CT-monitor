@@ -23,7 +23,7 @@ from html_generator import generate_html
 
 # Directorios
 OUTPUTS_DIR = 'outputs'
-MAX_WORKERS = 3  # Ajusta: 3-5 para balance velocidad/seguridad
+MAX_WORKERS = 4  # Ajusta: 3-5 para balance velocidad/seguridad
 
 def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str, exp_map: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Procesa una wishlist individual y devuelve la lista de resultados."""
@@ -147,10 +147,9 @@ def processing_func(wishlist_id: str | None = None) -> int:
         all_results.extend(results)
         total_processed = len(results)
     
-    # Generar HTML y resumen histórico
+    # Generar HTML (sin CSV)
     if all_results:
         html_path = generate_html(all_results)
-        historical_manager.generate_summary()
     
     print(f"\n¡Listo! Total de cartas procesadas: {total_processed}")
     return total_processed
