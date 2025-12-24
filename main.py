@@ -1,168 +1,91 @@
-import csv
-import os
+#!/usr/bin/env python3
 import time
-import requests
 import sys
-from typing import Dict, Any, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+import os
 from dotenv import load_dotenv
 
-try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-    print("Instala tqdm para barra de progreso: pip install tqdm")
+# Imports modulares
+from config import load_config
+from scraper.browser import scrape_wishlist, timed_input
+from scraper.parser import parsear_cartas
+from db.handler import guardar_historial, analizar_ejemplo
+from db import generar_html_stats  # Para generar el HTML
+from utils.telegram import send_telegram_message
 
-from api_utils import create_session
-from card_processor import process_single_card
-from scheduler import get_wishlist_id, run_scheduler
-import historical_manager
-from html_generator import generate_html
+load_config()  # Carga .env
 
-# Directorios
-OUTPUTS_DIR = 'outputs'
-MAX_WORKERS = 4  # Ajusta: 3-5 para balance velocidad/seguridad
-
-def process_wishlist(wishlist_id: str, session: requests.Session, base_url: str, exp_map: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Procesa una wishlist individual y devuelve la lista de resultados."""
-    print(f"\nObteniendo wishlist {wishlist_id}...")
+def procesar_wishlist(wishlist_id):
+    """
+    Procesa una wishlist individual.
+    """
+    url = f"https://www.cardtrader.com/wishlists/{wishlist_id}"
+    print(f"\n=== Procesando Wishlist {wishlist_id} ===")
+    print(f"[DEBUG] URL: {url}")
     
-    wishlist_resp = session.get(f"{base_url}/wishlists/{wishlist_id}")
-    if wishlist_resp.status_code != 200:
-        print(f"Error en wishlist {wishlist_id}: {wishlist_resp.status_code}")
-        return []
-    
-    wishlist = wishlist_resp.json()
-    
-    # Items únicos
-    unique_items = {}
-    for item in wishlist['items']:
-        card_slug = item.get('meta_name')
-        if card_slug:
-            unique_items[card_slug] = item
-    
-    items_list = list(unique_items.values())
-    print(f"Procesando {len(items_list)} cartas con {MAX_WORKERS} workers...")
-    
-    # Multihilo: Submit tasks
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_item = {
-            executor.submit(process_single_card, item, session, exp_map): item 
-            for item in items_list
-        }
-        
-        # Progreso
-        if TQDM_AVAILABLE:
-            progress_iter = tqdm(as_completed(future_to_item), total=len(items_list), desc=f"Procesando cartas ({wishlist_id})")
-        else:
-            progress_iter = as_completed(future_to_item)
-        
-        for future in progress_iter:
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as exc:
-                item = future_to_item[future]
-                card_slug = item.get('meta_name', 'unknown')
-                print(f"Error en {card_slug}: {exc}")
-    
-    # Añadir wishlist_id a cada resultado y actualizar histórico
-    for result in results:
-        result['wishlist'] = wishlist_id
-        card_name = result['nombre_carta']
-        price = float(result['precio_euros'])
-        historical_manager.update_historical(card_name, price)
-    
-    print(f"  Encontrados {len(results)} productos válidos para {wishlist_id}")
-    
-    if not results:
-        print(f"  No resultados para {wishlist_id}.")
-    
-    return results
-
-def processing_func(wishlist_id: str | None = None) -> int:
-    """Función principal de procesamiento: Maneja input, sesión, expansiones y wishlists."""
-    load_dotenv()
-    
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
-    
-    # Leer token de var de entorno con fallback
-    token = os.getenv('CARDTRADER_TOKEN')
-    if not token:
-        token = input("CARDTRADER_TOKEN no encontrado en .env. Ingresa tu token: ").strip()
-        if not token:
-            print("Error: Token requerido.")
-            return 0
-    
-    session = create_session(token)
-    base_url = 'https://api.cardtrader.com/api/v2'
-    
-    # Obtener expansiones (con delay para estabilidad)
-    time.sleep(2)  # Inicial para "calentar"
-    expansions_resp = session.get(f'{base_url}/expansions')
-    if expansions_resp.status_code != 200:
-        print(f"Error expansiones: {expansions_resp.status_code} - {expansions_resp.text[:100]}")
-        return 0
-    expansions = expansions_resp.json()
-    exp_map = {e['code'].lower(): e for e in expansions if e['game_id'] == 1}
-    print(f"Expansiones: {len(exp_map)}")
-    
-    # Input con opción para archivo (bloqueante si None)
-    if wishlist_id is None:
-        wishlist_id = get_wishlist_id(block=True)
-    
-    total_processed = 0
-    all_results = []
-    
-    if not wishlist_id:
-        # Modo archivo
-        file_path = 'wishlists'
-        try:
-            with open(file_path, 'r') as f:
-                wishlist_ids = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-        except FileNotFoundError:
-            print(f"Error: No se encontró {file_path}. Crea el archivo con IDs de wishlists, uno por línea.")
-            return 0
-        except Exception as e:
-            print(f"Error al leer {file_path}: {e}")
-            return 0
-        
-        if not wishlist_ids:
-            print(f"Archivo {file_path} vacío. Agrega IDs de wishlists.")
-            return 0
-        
-        print(f"Procesando {len(wishlist_ids)} wishlists desde {file_path}...")
-        for wid in wishlist_ids:
-            results = process_wishlist(wid, session, base_url, exp_map)
-            all_results.extend(results)
-            total_processed += len(results)
-            time.sleep(1)  # Pequeña pausa entre wishlists para estabilidad
+    texto = scrape_wishlist(url)
+    if texto:
+        print("Extraído.")
     else:
-        # Modo single
-        results = process_wishlist(wishlist_id, session, base_url, exp_map)
-        all_results.extend(results)
-        total_processed = len(results)
+        print("Falló.")
+        return 0
     
-    # Generar HTML (sin CSV)
-    if all_results:
-        html_path = generate_html(all_results)
+    if not texto:
+        return 0
     
-    print(f"\n¡Listo! Total de cartas procesadas: {total_processed}")
-    return total_processed
+    print("[DEBUG] Parse...")
+    cartas = parsear_cartas(texto)
+    total_cartas = len(cartas)
+    if cartas:
+        print(f"¡Éxito! {len(cartas)} cartas:")
+        for c in cartas[:10]:
+            print(f"  {c['Nombre']} | €{c['Precio']:.2f}")
+        if len(cartas) > 10:
+            print(f"  ... +{len(cartas)-10}.")
+        
+        guardar_historial(cartas, wishlist_id=wishlist_id)
+        analizar_ejemplo()
+        generar_html_stats()  # Genera el HTML actualizado
+    else:
+        print("No válidas. Revisa si los precios se cargaron (busca €0.00 en el log).")
+        total_cartas = 0
+    
+    return total_cartas
 
 if __name__ == "__main__":
-    load_dotenv()
+    print("¡Bienvenido!")
+    wishlist_id = timed_input("ID wishlist (o Enter para procesar archivo wishlists.txt): ", 60)
     
-    # Lee intervalo de .env con fallback
-    interval_minutes = int(os.getenv('INTERVAL_MINUTES', 60))
-    
-    # Para ejecutar solo una vez (modo legacy)
-    if len(sys.argv) > 1 and sys.argv[1] == '--once':
-        processing_func()
+    if wishlist_id:
+        # Modo single
+        num_cartas = procesar_wishlist(wishlist_id)
+        send_telegram_message(f"Scraping completado para wishlist {wishlist_id}. Cartas: {num_cartas}")
     else:
-        # Modo scheduler: Usa el intervalo de .env
-        run_scheduler(processing_func, interval_minutes=interval_minutes)
+        # Modo batch: lee de wishlists.txt
+        wishlist_file = 'wishlists.txt'
+        if not os.path.exists(wishlist_file):
+            print(f"[ERROR] Archivo {wishlist_file} no encontrado. Crea uno con IDs uno por línea.")
+            sys.exit(1)
+        
+        with open(wishlist_file, 'r') as f:
+            ids = [line.strip() for line in f if line.strip()]
+        
+        if not ids:
+            print("[ERROR] No hay IDs en el archivo.")
+            sys.exit(1)
+        
+        interval_minutes = int(os.getenv('INTERVAL_MINUTES', 60))
+        
+        while True:
+            print(f"[INFO] Procesando {len(ids)} wishlists de {wishlist_file}...")
+            total_cartas_global = 0
+            for idx, wid in enumerate(ids, 1):
+                print(f"\n--- {idx}/{len(ids)} ---")
+                cartas_procesadas = procesar_wishlist(wid)
+                total_cartas_global += cartas_procesadas
+                print(f"Cartas procesadas en esta wishlist: {cartas_procesadas}")
+            
+            print(f"\n¡Proceso completado! Total cartas únicas procesadas: {total_cartas_global}")
+            send_telegram_message(f"Scraping batch completado! Total cartas: {total_cartas_global}")
+            
+            print(f"[INFO] Esperando {interval_minutes} minutos antes de siguiente ciclo...")
+            time.sleep(interval_minutes * 60)
