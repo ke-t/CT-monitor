@@ -7,13 +7,14 @@ from dotenv import load_dotenv
 
 # Imports modulares
 from config import load_config
+from db.handler import inicializar_bd, guardar_historial, analizar_ejemplo, get_significant_price_changes
+from db import generar_html_stats  # Para generar el HTML
 from scraper.browser import scrape_wishlist, timed_input
 from scraper.parser import parsear_cartas
-from db.handler import guardar_historial, analizar_ejemplo, get_significant_price_changes
-from db import generar_html_stats  # Para generar el HTML
 from utils.telegram import send_telegram_message
 
-load_config()  # Carga .env
+load_config()  # Carga .env y valida variables requeridas (con raise si falta algo)
+inicializar_bd()  # Inicializa BD con nuevo schema (UNIQUE, DATETIME)
 
 def procesar_wishlist(wishlist_id):
     """
@@ -43,7 +44,7 @@ def procesar_wishlist(wishlist_id):
         if len(cartas) > 10:
             print(f"  ... +{len(cartas)-10}.")
         
-        guardar_historial(cartas, wishlist_id=wishlist_id)
+        inserted = guardar_historial(cartas, wishlist_id=wishlist_id)
         
         # Nueva lógica: Chequea cambios significativos y alerta condicional
         cambios = get_significant_price_changes(threshold=0.05)
@@ -55,11 +56,12 @@ def procesar_wishlist(wishlist_id):
         else:
             print("[DEBUG] Sin cambios >0.05€ en esta wishlist. Skip Telegram detallado.")
         
-        analizar_ejemplo()
+        analizar_ejemplo(inserted)  # Pasa el count de inserts para export condicional
         generar_html_stats()  # Genera el HTML actualizado
     else:
         print("No válidas. Revisa si los precios se cargaron (busca €0.00 en el log).")
         total_cartas = 0
+        analizar_ejemplo(0)  # No inserts, pero llama para stats (skip export)
     
     return total_cartas
 

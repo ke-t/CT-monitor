@@ -1,144 +1,148 @@
 import sqlite3
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
+import os
 
-def inicializar_bd(db_file='historico_cartas.db'):
-    """
-    Inicializa la base de datos (simple, sin extras).
-    """
-    with sqlite3.connect(db_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS precios_cartas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nombre TEXT NOT NULL,
-                precio REAL NOT NULL,
-                fecha TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                wishlist_id INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_nombre_fecha_timestamp ON precios_cartas (nombre, fecha, timestamp)')
-        # Commit automático al salir del with
+DB_PATH = 'historico_cartas.db'
 
-def guardar_historial(cartas, db_file='historico_cartas.db', wishlist_id=0):
+def inicializar_bd():
     """
-    Guarda o actualiza el histórico de precios (solo esenciales).
-    Usa batch insert con executemany para eficiencia.
+    Inicializa la base de datos SQLite con tabla precios_cartas.
+    - Agrega UNIQUE constraint en (nombre, fecha, timestamp) para evitar duplicados.
+    - Cambia timestamp a tipo DATETIME (afinidad en SQLite; almacenamos como ISO string).
+    - Nota: Si la tabla existe, la recrea para aplicar cambios (backup manual recomendado).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Recrear tabla para aplicar cambios (en prod, usa ALTER o migración)
+    cursor.execute("DROP TABLE IF EXISTS precios_cartas")
+    
+    # Nueva estructura: timestamp como DATETIME (almacenamos full datetime)
+    cursor.execute("""
+        CREATE TABLE precios_cartas (
+            nombre TEXT NOT NULL,
+            precio REAL NOT NULL,
+            fecha TEXT NOT NULL,  -- YYYY-MM-DD (mantenemos para compatibilidad)
+            timestamp DATETIME NOT NULL,  -- Full: YYYY-MM-DD HH:MM:SS (nuevo tipo)
+            wishlist_id INTEGER NOT NULL,
+            UNIQUE(nombre, fecha, timestamp)  -- Evita dups exactos
+        )
+    """)
+    
+    # Índices para queries rápidas
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_wishlist_fecha ON precios_cartas(wishlist_id, fecha)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_nombre_fecha ON precios_cartas(nombre, fecha)")
+    
+    conn.commit()
+    conn.close()
+    print(f"[INFO] BD inicializada en {DB_PATH} con constraints y DATETIME.")
+
+def guardar_historial(cartas, wishlist_id):
+    """
+    Guarda el histórico de precios en batch, solo si precio cambió (>0.01€).
+    - Usa full datetime para timestamp.
+    - Retorna número de filas insertadas (para condicional en export).
     """
     if not cartas:
-        return
+        return 0
     
-    inicializar_bd(db_file)
-    with sqlite3.connect(db_file) as conn:
-        cursor = conn.cursor()
-        to_insert = []  # Lista para batch: [(nombre, precio, fecha, timestamp, wishlist_id), ...]
-        guardadas = 0
-        
-        for carta in cartas:
-            nombre = carta['Nombre']
-            precio = carta['Precio']
-            fecha = carta['Fecha']
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            # Consulta el último precio para esta carta en esta fecha
-            cursor.execute('''
-                SELECT precio FROM precios_cartas 
-                WHERE nombre = ? AND fecha = ? 
-                ORDER BY timestamp DESC LIMIT 1
-            ''', (nombre, fecha))
-            resultado = cursor.fetchone()
-            
-            if resultado is None:
-                # No hay histórico: registrar
-                print(f"[DEBUG] Nueva carta {nombre}: Registrando €{precio}")
-                to_insert.append((nombre, precio, fecha, timestamp, wishlist_id))
-                guardadas += 1
-            else:
-                ultimo_precio = resultado[0]
-                if abs(precio - ultimo_precio) < 0.01:  # Diferencia menor a 1 céntimo
-                    print(f"[DEBUG] {nombre}: Precio igual (€{precio} == €{ultimo_precio}). Saltando.")
-                else:
-                    # Precio diferente: registrar nuevo
-                    print(f"[DEBUG] {nombre}: Precio cambió (€{ultimo_precio} -> €{precio}). Registrando.")
-                    to_insert.append((nombre, precio, fecha, timestamp, wishlist_id))
-                    guardadas += 1
-        
-        # Batch insert si hay algo
-        if to_insert:
-            cursor.executemany('''
-                INSERT INTO precios_cartas (nombre, precio, fecha, timestamp, wishlist_id)
-                VALUES (?, ?, ?, ?, ?)
-            ''', to_insert)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     
-    print(f"¡Guardadas {guardadas} actualizaciones!")
+    inserted_count = 0
+    inserts = []
+    now = datetime.now()
+    fecha = now.strftime("%Y-%m-%d")
+    timestamp_full = now.strftime("%Y-%m-%d %H:%M:%S")  # ISO para DATETIME
+    
+    for carta in cartas:
+        nombre = carta['Nombre']
+        precio = float(carta['Precio'])
+        
+        # Check si ya existe con mismo precio (último timestamp)
+        cursor.execute("""
+            SELECT precio FROM precios_cartas 
+            WHERE nombre = ? AND fecha = ? AND wishlist_id = ? 
+            ORDER BY timestamp DESC LIMIT 1
+        """, (nombre, fecha, wishlist_id))
+        last_precio = cursor.fetchone()
+        
+        if last_precio is None or abs(last_precio[0] - precio) > 0.01:
+            # Insert solo si nuevo o cambió
+            inserts.append((nombre, precio, fecha, timestamp_full, wishlist_id))
+            inserted_count += 1
+    
+    if inserts:
+        cursor.executemany("""
+            INSERT INTO precios_cartas (nombre, precio, fecha, timestamp, wishlist_id)
+            VALUES (?, ?, ?, ?, ?)
+        """, inserts)
+        conn.commit()
+        print(f"[INFO] Insertadas {len(inserts)} nuevas/updates para wishlist {wishlist_id}.")
+    
+    conn.close()
+    return inserted_count  # Retorna para condicional
 
-def get_significant_price_changes(db_file='historico_cartas.db', threshold=0.05):
+def get_significant_price_changes(threshold=0.05):
     """
-    Nueva función para enhancement: Obtiene cartas con cambios de precio > threshold (€ absolutos)
-    respecto al precio anterior. Útil para alertas condicionales en Telegram.
+    Obtiene cambios de precio significativos (> threshold) desde el histórico.
+    Usa window functions para diffs.
+    """
+    conn = sqlite3.connect(DB_PATH)
     
-    Returns: DataFrame con columnas ['nombre', 'precio_actual', 'precio_anterior', 'diff_euros', 'wishlist_id']
-    Si no hay cambios, DF vacío.
-    """
-    with sqlite3.connect(db_file) as conn:
-        # Query completa para calcular diffs con window function (SQLite soporta LAG)
-        query = '''
-        WITH precios_ordenados AS (
-            SELECT nombre, precio, timestamp, wishlist_id,
-                   LAG(precio) OVER (PARTITION BY nombre ORDER BY timestamp) AS precio_anterior
+    # Query con LAG para diff anterior
+    query = """
+        WITH diffs AS (
+            SELECT 
+                nombre, precio, fecha, timestamp, wishlist_id,
+                LAG(precio) OVER (PARTITION BY nombre, wishlist_id ORDER BY fecha, timestamp) AS prev_precio,
+                precio - LAG(precio) OVER (PARTITION BY nombre, wishlist_id ORDER BY fecha, timestamp) AS diff
             FROM precios_cartas
-            ORDER BY nombre, timestamp
         )
-        SELECT nombre, precio AS precio_actual, precio_anterior, 
-               ABS(precio - precio_anterior) AS diff_euros, wishlist_id
-        FROM precios_ordenados
-        WHERE precio_anterior IS NOT NULL AND ABS(precio - precio_anterior) > ?
-        ORDER BY diff_euros DESC
-        '''
-        df = pd.read_sql_query(query, conn, params=(threshold,))
+        SELECT nombre, precio, prev_precio, diff, fecha, timestamp, wishlist_id
+        FROM diffs 
+        WHERE ABS(diff) > ? AND diff IS NOT NULL
+        ORDER BY wishlist_id, nombre, fecha DESC
+    """
     
-    if not df.empty:
-        print(f"[DEBUG] {len(df)} cambios significativos (>€{threshold}) detectados.")
+    df = pd.read_sql_query(query, conn, params=(threshold,))
+    conn.close()
     return df
 
-def analizar_ejemplo(db_file='historico_cartas.db'):
+def analizar_ejemplo(inserted_count=0):
     """
-    Análisis básico de la DB, filtrado a últimos 30 días para relevancia.
+    Analiza ejemplo: stats últimos 30 días y exporta CSV solo si hay cambios/inserts.
+    - Condicional: Exporta solo si inserted_count > 0 (nueva data).
     """
-    try:
-        with sqlite3.connect(db_file) as conn:
-            # Filtrar últimos 30 días en query para eficiencia
-            fecha_limite = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            df = pd.read_sql_query(
-                "SELECT * FROM precios_cartas WHERE timestamp >= ? ORDER BY nombre, timestamp", 
-                conn, params=(fecha_limite,)
-            )
+    conn = sqlite3.connect(DB_PATH)
+    
+    # Query últimos 30 días (usa fecha)
+    treinta_dias_atras = (datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    query = """
+        SELECT nombre, AVG(precio) as media, MIN(precio) as min, MAX(precio) as max,
+               COUNT(*) as muestras
+        FROM precios_cartas 
+        WHERE fecha >= ?
+        GROUP BY nombre
+        ORDER BY max DESC
+    """
+    
+    df = pd.read_sql_query(query, conn, params=(treinta_dias_atras,))
+    conn.close()
+    
+    if not df.empty:
+        print(f"[INFO] Stats últimos 30 días: {len(df)} cartas únicas.")
+        print(df.head())
         
-        if not df.empty:
-            print("\n=== Análisis (últimos 30 días) ===")
-            print(f"Registros: {len(df)}")
-            print(f"Promedio: €{df['precio'].mean():.2f}")
-            
-            if len(df) > 1:
-                # Asegurar orden para variaciones
-                df_sorted = df.sort_values(['nombre', 'timestamp'])
-                df_sorted['variacion'] = df_sorted.groupby('nombre')['precio'].pct_change()
-                print("\nCartas con mayor subida (%):")
-                subidas = df_sorted[df_sorted['variacion'] > 0].nlargest(5, 'variacion')[['nombre', 'precio', 'variacion']]
-                if not subidas.empty:
-                    print(subidas.to_string(index=False))
-                else:
-                    print("Sin subidas detectadas.")
-            
-            # Último precio por carta (basado en max timestamp)
-            ultimo_precio = df.loc[df.groupby('nombre')['timestamp'].idxmax()][['nombre', 'precio']].sort_values('precio', ascending=False).head(10)
-            print("\nTop 10 (precios más altos actuales):")
-            print(ultimo_precio.to_string(index=False))
-            
-            df.to_csv('historico.csv', index=False)
-            print("\nDatos exportados a 'historico.csv'.")
+        # Export condicional: Solo si hay inserts nuevos
+        if inserted_count > 0:
+            csv_path = 'historico.csv'
+            df.to_csv(csv_path, index=False)
+            print(f"[INFO] Exportado CSV a {csv_path} (nuevos cambios detectados).")
         else:
-            print("\nNo datos en últimos 30 días.")
-    except Exception as e:
-        print(f"Error análisis: {e}")
+            print("[INFO] Skip export CSV: Sin nuevos inserts.")
+    else:
+        print("[INFO] Sin data en últimos 30 días.")
+
+# Nota: inicializar_bd() se llama una vez al start, e.g., en main.py
