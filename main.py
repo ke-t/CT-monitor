@@ -46,11 +46,12 @@ def procesar_wishlist(wishlist_id):
         
         inserted = guardar_historial(cartas, wishlist_id=wishlist_id)
         
-        # Nueva lógica: Chequea cambios significativos y alerta condicional
+        # Chequea cambios y alerta si hay
         cambios = get_significant_price_changes(threshold=0.05)
         cambios_wishlist = cambios[cambios['wishlist_id'] == wishlist_id] if not cambios.empty else pd.DataFrame()
         if not cambios_wishlist.empty:
             mensaje = f"¡Cambios significativos en wishlist {wishlist_id} (>€0.05)!\n\n{cambios_wishlist.to_string(index=False)}"
+            print("[DEBUG] ¡Intentando enviar Telegram detallado!")  # DEBUG
             send_telegram_message(mensaje)
             print(f"[DEBUG] Enviado Telegram con {len(cambios_wishlist)} cambios para {wishlist_id}.")
         else:
@@ -72,11 +73,11 @@ if __name__ == "__main__":
     if wishlist_id:
         # Modo single
         num_cartas = procesar_wishlist(wishlist_id)
-        # Mensaje de cierre condicional
+        # Mensaje de cierre SIEMPRE
+        print("[DEBUG] ¡Intentando enviar resumen single!")  # DEBUG
         cambios = get_significant_price_changes(threshold=0.05)
         cambios_wishlist = cambios[cambios['wishlist_id'] == int(wishlist_id)] if not cambios.empty else pd.DataFrame()
         if not cambios_wishlist.empty:
-            # Ya enviado el detalle arriba, solo resumen
             send_telegram_message(f"Scraping completado para wishlist {wishlist_id}. {len(cambios_wishlist)} cambios detectados.")
         else:
             send_telegram_message(f"Scraping completado para wishlist {wishlist_id}. Cartas: {num_cartas}. Sin cambios significativos.")
@@ -105,14 +106,15 @@ if __name__ == "__main__":
                 total_cartas_global += cartas_procesadas
                 print(f"Cartas procesadas en esta wishlist: {cartas_procesadas}")
             
-            # Nueva lógica: Chequeo global post-batch para resumen condicional
+            # Mensaje de cierre SIEMPRE en batch
+            print("[DEBUG] ¡Intentando enviar resumen batch!")  # DEBUG
             cambios_global = get_significant_price_changes(threshold=0.05)
             if not cambios_global.empty:
                 print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. {len(cambios_global)} cambios globales detectados.")
                 send_telegram_message(f"Scraping batch completado! Total cartas: {total_cartas_global}. {len(cambios_global)} cambios significativos en total.")
             else:
                 print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. Sin cambios significativos.")
-                # Opcional: send_telegram_message("Batch completado sin cambios.")  # Descomenta si quieres notificar siempre
+                send_telegram_message(f"Batch completado sin cambios. Total cartas procesadas: {total_cartas_global}.")
             
             print(f"[INFO] Esperando {interval_minutes} minutos antes de siguiente ciclo...")
             time.sleep(interval_minutes * 60)
