@@ -34,7 +34,7 @@ def scrape_wishlist(url):
     """
     print(f"[DEBUG] Iniciando scrape de {url}")
     options = Options()
-    options.binary_location = '/usr/bin/google-chrome-stable'
+    options.binary_location = os.getenv('CHROME_BINARY_LOCATION')
     chrome_profile_path = os.getenv('CHROME_PROFILE_PATH')
     options.add_argument(f'--user-data-dir={chrome_profile_path}')
     options.add_argument('--no-sandbox')
