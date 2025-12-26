@@ -12,7 +12,7 @@ def parsear_cartas(texto):
     i = 0
     while i < len(lines):
         line = lines[i]
-        if re.match(r'^[A-ZÀ-Ú][a-zà-ú]+.*', line) and not line.startswith('€') and 'Indiferente' not in line and line not in ['No', 'Sí'] and len(line) > 5:
+        if re.match(r'^[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s\-\d\/]+', line) and not line.startswith('€') and 'Indiferente' not in line and line not in ['No', 'Sí'] and len(line) > 5:
             if line[0].isdigit() and ' ' in line:
                 parts = line.split(' ', 1)
                 nombre = parts[1].strip()

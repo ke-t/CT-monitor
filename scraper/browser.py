@@ -2,6 +2,7 @@ import re
 import time
 import sys
 import select
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -34,7 +35,7 @@ def scrape_wishlist(url):
     print(f"[DEBUG] Iniciando scrape de {url}")
     options = Options()
     options.binary_location = '/usr/bin/google-chrome-stable'
-    chrome_profile_path = '/home/poio/.config/google-chrome/Default'
+    chrome_profile_path = os.getenv('CHROME_PROFILE_PATH')
     options.add_argument(f'--user-data-dir={chrome_profile_path}')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')

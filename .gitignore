@@ -1,7 +1,3 @@
-# Archivos sensibles (tokens y credenciales)
-telegram_token.txt
-telegram_chat_id.txt
-
 # Datos dinámicos y outputs (no versionar, ya que son generados)
 historical/
 outputs/
