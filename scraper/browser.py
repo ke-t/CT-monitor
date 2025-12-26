@@ -1,8 +1,8 @@
 import re
 import time
 import sys
-import select
 import os
+import select
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -34,8 +34,10 @@ def scrape_wishlist(url):
     """
     print(f"[DEBUG] Iniciando scrape de {url}")
     options = Options()
-    options.binary_location = os.getenv('CHROME_BINARY_LOCATION')
-    chrome_profile_path = os.getenv('CHROME_PROFILE_PATH')
+    # Nueva: Env var para binary (fallback hardcoded)
+    options.binary_location = os.getenv('CHROME_BINARY_PATH', '/usr/bin/google-chrome-stable')
+    # Nueva: Env var para profile (era hardcoded)
+    chrome_profile_path = os.getenv('CHROME_PROFILE_PATH', '/home/poio/.config/google-chrome/Default')
     options.add_argument(f'--user-data-dir={chrome_profile_path}')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
