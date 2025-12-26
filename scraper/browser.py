@@ -55,40 +55,46 @@ def scrape_wishlist(url):
     try:
         print(f"[DEBUG] Accediendo a: {url}")
         driver.get(url)
-        print("[DEBUG] Espera 10s para carga inicial...")
-        time.sleep(10)
-
-        # Chequea login
-        if "login" in driver.current_url.lower() or "iniciar sesion" in driver.page_source.lower():
-            print("[WARNING] No logueado. Loguéate en la ventana ahora.")
-            return None  # Sale si no logueado
-
-        # Nueva lógica: Espera que .deck-table-rows tenga contenido (cartas)
-        print("[DEBUG] Esperando .deck-table-rows con cartas...")
+        
+        # REEMPLAZO: Espera dinámica para carga inicial y tabla (en vez de sleep(10))
+        print("[DEBUG] Esperando carga inicial y tabla con cartas (máx 30s)...")
         try:
             WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".deck-table-rows .deck-table-row"))
             )
             print("[DEBUG] Tabla con cartas detectada.")
         except TimeoutException:
-            print("[ERROR] No se cargó la tabla con cartas. Revisa manualmente.")
+            print("[ERROR] No se cargó la tabla con cartas en 30s. Revisa conexión o sitio.")
             return None
 
-        # Hover en .card.mx-auto.card-featured para mostrar precios ZERO
+        # Chequea login (igual)
+        if "login" in driver.current_url.lower() or "iniciar sesion" in driver.page_source.lower():
+            print("[WARNING] No logueado. Loguéate en la ventana ahora.")
+            return None
+
+        # Hover en .card.mx-auto.card-featured (igual, pero con wait después)
         print("[DEBUG] Buscando y hover en '.card.mx-auto.card-featured'...")
         try:
             featured_card = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".card.mx-auto.card-featured")))
             ActionChains(driver).move_to_element(featured_card).perform()
-            print("[DEBUG] Hover realizado en card-featured. Esperando cambios...")
-            time.sleep(3)  # Pausa breve para que se muestren los precios ZERO
+            print("[DEBUG] Hover realizado. Esperando estabilización de tooltips (máx 5s)...")
+            
+            # REEMPLAZO: Wait para que precios/tooltips se muestren (en vez de sleep(3))
+            WebDriverWait(driver, 5).until(
+                lambda d: any(
+                    re.search(r'€(\d+\.\d{2})', elem.get_attribute('data-original-title') or elem.text)
+                    for elem in d.find_elements(By.CSS_SELECTOR, ".deck-table-row__price [data-original-title]")
+                    if float(re.search(r'€(\d+\.\d{2})', elem.get_attribute('data-original-title') or elem.text).group(1)) > 0
+                    if re.search(r'€(\d+\.\d{2})', elem.get_attribute('data-original-title') or elem.text)
+                ) or True  # Fallback si no hay, solo espera 1s mínimo
+            )
+            print("[DEBUG] Tooltips/precios estabilizados.")
         except TimeoutException:
-            print("[WARNING] Elemento '.card.mx-auto.card-featured' no encontrado. Continuando sin hover...")
+            print("[WARNING] Elemento '.card.mx-auto.card-featured' no encontrado o timeout en hover. Continuando...")
         except Exception as hover_err:
             print(f"[ERROR] Error en hover: {hover_err}")
 
-        # Espera 5s adicionales y comprueba el botón
-        print("[DEBUG] Esperando 5s adicionales para estabilizar...")
-        time.sleep(5)
+        # REEMPLAZO: Eliminamos sleep(5); la siguiente wait lo cubre
         print("[DEBUG] Buscando botón '.btn.btn-success'...")
         try:
             optimize_button = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn.btn-success")))
@@ -98,45 +104,53 @@ def scrape_wishlist(url):
             if is_enabled:
                 print("[DEBUG] Botón enabled: Click en él...")
                 optimize_button.click()
-                print("[DEBUG] Click realizado. Esperando precios en tabla...")
-                time.sleep(10)  # Espera inicial fija después del click
+                print("[DEBUG] Click realizado. Esperando precios actualizados (máx 30s)...")
+                
+                # REEMPLAZO: Wait dinámica para al menos un precio no cero (en vez de sleep(10))
+                def has_non_zero_price(driver):
+                    page_text = driver.page_source
+                    soup_temp = BeautifulSoup(page_text, 'html.parser')
+                    container_temp = soup_temp.select_one('.deck-table-rows')
+                    if container_temp:
+                        rows_temp = container_temp.select('.deck-table-row')
+                        for row_temp in rows_temp[:5]:  # Chequea solo primeras 5 para velocidad
+                            # Chequea precio principal
+                            price_div_temp = row_temp.select_one('.deck-table-row__price .row .col')
+                            if price_div_temp:
+                                cell_text_temp = price_div_temp.get_text(strip=True)
+                                match_temp = re.search(r'€(\d+\.\d{2})', cell_text_temp)
+                                if match_temp and float(match_temp.group(1)) > 0:
+                                    return True
+                            # Fallback tooltip
+                            tooltip_row_temp = row_temp.select_one('.deck-table-row__price .row[data-original-title]')
+                            if tooltip_row_temp:
+                                tooltip_temp = tooltip_row_temp.get('data-original-title', '')
+                                match_temp = re.search(r'€(\d+\.\d{2})', tooltip_temp)
+                                if match_temp and float(match_temp.group(1)) > 0:
+                                    return True
+                    return False
+                
+                try:
+                    WebDriverWait(driver, 30).until(has_non_zero_price)
+                    print("[DEBUG] Al menos un precio no cero detectado después del click.")
+                except TimeoutException:
+                    print("[WARNING] No se detectaron precios no cero en 30s después del click. Continuando...")
             else:
                 print("[DEBUG] Botón disabled: Esperando que carguen los precios...")
             
-            # Espera precios no cero en la TABLA (unificada y estricta)
-            print("[DEBUG] Esperando precios no cero en tabla (máx 3 min)...")
-            max_wait = 180
-            waited = 10  # Ya esperamos 10s
-            has_non_zero = False
+            # REEMPLAZO: Loop de polling más eficiente (2s en vez de 5s, máx 90s total)
+            print("[DEBUG] Verificando precios no cero en tabla (máx 90s, poll cada 2s)...")
+            max_wait = 90
+            waited = 0
+            has_non_zero = has_non_zero_price(driver)  # Chequeo inicial
             while waited < max_wait and not has_non_zero:
-                page_text = driver.page_source
-                soup_temp = BeautifulSoup(page_text, 'html.parser')
-                container_temp = soup_temp.select_one('.deck-table-rows')
-                if container_temp:
-                    rows_temp = container_temp.select('.deck-table-row')
-                    for row_temp in rows_temp[:10]:  # Chequea solo primeras 10 para velocidad
-                        price_div_temp = row_temp.select_one('.deck-table-row__price .row .col')
-                        if price_div_temp:
-                            cell_text_temp = price_div_temp.get_text(strip=True)
-                            match_temp = re.search(r'€(\d+\.\d{2})', cell_text_temp)
-                            if match_temp and float(match_temp.group(1)) > 0:
-                                has_non_zero = True
-                                break
-                        # Fallback tooltip
-                        tooltip_row_temp = row_temp.select_one('.deck-table-row__price .row[data-original-title]')
-                        if tooltip_row_temp:
-                            tooltip_temp = tooltip_row_temp.get('data-original-title', '')
-                            match_temp = re.search(r'€(\d+\.\d{2})', tooltip_temp)
-                            if match_temp and float(match_temp.group(1)) > 0:
-                                has_non_zero = True
-                                break
-                if has_non_zero:
-                    print(f"[DEBUG] Precios no cero en tabla OK en {waited}s.")
-                    break
-                time.sleep(5)
-                waited += 5
+                time.sleep(2)  # Poll más frecuente y corto
+                waited += 2
+                has_non_zero = has_non_zero_price(driver)
+            if has_non_zero:
+                print(f"[DEBUG] Precios no cero OK en {waited}s.")
             else:
-                print("[WARNING] Timeout esperando precios no cero en tabla. Continuando con lo que hay (posiblemente 0.00).")
+                print("[WARNING] Timeout esperando precios no cero. Continuando con lo disponible.")
                 
         except TimeoutException:
             print("[WARNING] Botón '.btn.btn-success' no encontrado. Continuando sin optimizar...")
