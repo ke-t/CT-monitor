@@ -3,17 +3,19 @@ import time
 import sys
 import os
 import pandas as pd  # Para filtrar DataFrame
+import random  # Para gaussiana en interval
 from dotenv import load_dotenv
 
 # Imports modulares
-from config import load_config
+from config import load_config  # Ya no llamamos aquí; se auto-carga en config/__init__.py
 from db.handler import inicializar_bd, guardar_historial, analizar_ejemplo, get_significant_price_changes
 from db import generar_html_stats  # Para generar el HTML
 from scraper.browser import scrape_wishlist, timed_input
 from scraper.parser import parsear_cartas
 from utils.telegram import send_telegram_message
 
-load_config()  # Carga .env y valida variables requeridas (con raise si falta algo)
+# load_config()  # REMOVIDO: Ahora se auto-ejecuta en config/__init__.py al importar
+
 inicializar_bd()  # Inicializa BD con nuevo schema (UNIQUE, DATETIME)
 
 def procesar_wishlist(wishlist_id):
@@ -95,7 +97,8 @@ if __name__ == "__main__":
             print("[ERROR] No hay IDs válidos en el archivo (ignora líneas con # para comentarios).")
             sys.exit(1)
         
-        interval_minutes = int(os.getenv('INTERVAL_MINUTES', 60))
+        # Usa config para interval gaussiano (ya disponible por auto-load)
+        from config import INTERVAL_MIN_MIN, INTERVAL_MAX_MIN, INTERVAL_MEAN_MIN, INTERVAL_STD_MIN
         
         while True:
             print(f"[INFO] Procesando {len(ids)} wishlists de {wishlist_file}...")
@@ -116,5 +119,14 @@ if __name__ == "__main__":
                 print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. Sin cambios significativos.")
                 send_telegram_message(f"Batch completado sin cambios. Total cartas procesadas: {total_cartas_global}.")
             
-            print(f"[INFO] Esperando {interval_minutes} minutos antes de siguiente ciclo...")
-            time.sleep(interval_minutes * 60)
+            # Intervalo gaussiano truncado
+            interval_min = INTERVAL_MIN_MIN * 60  # En segundos
+            interval_max = INTERVAL_MAX_MIN * 60
+            interval_mean = INTERVAL_MEAN_MIN * 60
+            interval_std = INTERVAL_STD_MIN * 60
+            
+            delay_interval = random.gauss(interval_mean, interval_std)
+            delay_interval = max(interval_min, min(delay_interval, interval_max))
+            
+            print(f"[INFO] Esperando intervalo gaussiano: ~{delay_interval / 60:.1f} minutos antes de siguiente ciclo...")
+            time.sleep(delay_interval)
