@@ -4,42 +4,29 @@ import sys
 import os
 import select
 import random  # Para gaussiana
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+from playwright.sync_api import sync_playwright, expect  # Nueva: Playwright sync
 from bs4 import BeautifulSoup
 
-# Importa config para delays (después de load_config en main)
+# Importa config para delays
 from config import DELAY_MIN_SEC, DELAY_MAX_SEC, DELAY_MEAN_SEC, DELAY_STD_SEC
 
 def random_delay(min_sec=None, max_sec=None, mean_sec=None, std_sec=None):
     """
     Delay aleatorio con distribución gaussiana (truncada a min/max).
-    - Si no pasas params, usa los de .env.
-    - Simula pausas humanas: mayoría cerca de la media.
     """
-    # Usa params locales o globales de config
     min_d = min_sec or DELAY_MIN_SEC
     max_d = max_sec or DELAY_MAX_SEC
     mean_d = mean_sec or DELAY_MEAN_SEC
     std_d = std_sec or DELAY_STD_SEC
     
-    # Genera gaussiano y clippea
     delay = random.gauss(mean_d, std_d)
-    delay = max(min_d, min(delay, max_d))  # Trunca al rango
+    delay = max(min_d, min(delay, max_d))
     
     time.sleep(delay)
-    # Opcional: print(f"[DEBUG] Delay aplicado: {delay:.2f}s (gaussiana)")  # Descomenta para debug
 
 def timed_input(prompt, timeout=60):
     """
-    Input con timeout. Si no se ingresa nada en X seg, retorna vacío.
+    Input con timeout.
     """
     sys.stdout.write(prompt)
     sys.stdout.flush()
@@ -48,165 +35,175 @@ def timed_input(prompt, timeout=60):
         line = sys.stdin.readline().strip()
         return line
     else:
-        print()  # Nueva línea para limpiar
+        print()
         return ""
 
 def scrape_wishlist(url):
     """
-    Realiza el scraping de una wishlist (versión simple, sin extras).
+    Scraping con Playwright (corregido: usa launch_persistent_context para perfil).
     """
-    print(f"[DEBUG] Iniciando scrape de {url}")
-    options = Options()
-    # Nueva: Env var para binary (fallback hardcoded)
-    options.binary_location = os.getenv('CHROME_BINARY_PATH', '/usr/bin/google-chrome-stable')
-    # Nueva: Env var para profile (era hardcoded)
-    chrome_profile_path = os.getenv('CHROME_PROFILE_PATH', os.getenv('CHROME_PROFILE_DIR', '/home/poio/.config/google-chrome/Default'))
-    options.add_argument(f'--user-data-dir={chrome_profile_path}')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    if os.getenv('HEADLESS', 'true').lower() == 'true':
-        options.add_argument('--headless')  # Headless activado
-
-    service = Service(ChromeDriverManager().install())
-    driver = None
+    print(f"[DEBUG] Iniciando scrape de {url} con Playwright")
+    playwright = None
+    browser = None
+    context = None
+    page = None
     try:
-        driver = webdriver.Chrome(service=service, options=options)
-        print("[DEBUG] Chrome iniciado con tu perfil. Debería estar logueado.")
-    except Exception as e:
-        print(f"[ERROR] Fallo al iniciar Chrome: {e}")
-        return None
-    
-    try:
-        print(f"[DEBUG] Accediendo a: {url}")
-        driver.get(url)
-        random_delay(min_sec=2, max_sec=5)  # Delay random post-load (gaussiano)
+        playwright = sync_playwright().start()
         
-        # REEMPLAZO: Espera dinámica para carga inicial y tabla (en vez de sleep(10))
-        print("[DEBUG] Esperando carga inicial y tabla con cartas (máx 30s)...")
-        try:
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".deck-table-rows .deck-table-row"))
-            )
-            print("[DEBUG] Tabla con cartas detectada.")
-        except TimeoutException:
-            print("[ERROR] No se cargó la tabla con cartas en 30s. Revisa conexión o sitio.")
+        # Config browser: Chromium con perfil persistente y stealth
+        chrome_profile_path = os.getenv('CHROME_PROFILE_PATH', os.getenv('CHROME_PROFILE_DIR', '/home/poio/.config/google-chrome/Default'))
+        headless = os.getenv('HEADLESS', 'true').lower() == 'true'
+        
+        # User-agents rotados para anti-detección
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ]
+        selected_ua = random.choice(user_agents)
+        
+        # Viewport random
+        width = random.randint(1200, 1920)
+        height = random.randint(800, 1080)
+        
+        # FIX: Usa launch_persistent_context para --user-data-dir
+        browser_type = playwright.chromium
+        context = browser_type.launch_persistent_context(
+            user_data_dir=chrome_profile_path,
+            headless=headless,
+            args=[
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                f'--window-size={width},{height}',
+            ],
+            viewport={'width': width, 'height': height},
+            user_agent=selected_ua,
+            extra_http_headers={
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Fetch-Mode': 'navigate',
+            }  # Anti-bot headers
+        )
+        page = context.new_page()  # Nueva página en el contexto persistente
+        
+        print("[DEBUG] Playwright iniciado con perfil persistente y stealth. Debería estar logueado.")
+        
+        # Navega y wait inicial
+        print(f"[DEBUG] Accediendo a: {url}")
+        page.goto(url, wait_until='networkidle')  # Espera JS/network
+        random_delay(min_sec=2, max_sec=5)  # Post-load gaussiano
+        
+        # Wait para tabla (dinámico, como antes)
+        print("[DEBUG] Esperando tabla con cartas (máx 30s)...")
+        page.wait_for_selector('.deck-table-rows .deck-table-row', timeout=30000)
+        print("[DEBUG] Tabla detectada.")
+        
+        # Chequea login
+        if "login" in page.url.lower() or "iniciar sesion" in page.content().lower():
+            print("[WARNING] No logueado. Loguéate manualmente en la ventana.")
             return None
 
-        # Chequea login (igual)
-        if "login" in driver.current_url.lower() or "iniciar sesion" in driver.page_source.lower():
-            print("[WARNING] No logueado. Loguéate en la ventana ahora.")
-            return None
-
-        # Hover en .card.mx-auto.card-featured (igual, pero con wait después)
-        print("[DEBUG] Buscando y hover en '.card.mx-auto.card-featured'...")
+        # Hover en featured card
+        print("[DEBUG] Hover en '.card.mx-auto.card-featured'...")
         try:
-            featured_card = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".card.mx-auto.card-featured")))
-            ActionChains(driver).move_to_element(featured_card).perform()
-            print("[DEBUG] Hover realizado. Esperando estabilización de tooltips (máx 5s)...")
+            featured_locator = page.locator('.card.mx-auto.card-featured')
+            featured_locator.wait_for(state='visible', timeout=10000)
+            featured_locator.hover()
+            print("[DEBUG] Hover realizado. Esperando tooltips (máx 5s)...")
             
-            # REEMPLAZO: Wait para que precios/tooltips se muestren (en vez de sleep(3))
-            WebDriverWait(driver, 5).until(
-                lambda d: any(
-                    re.search(r'€(\d+\.\d{2})', elem.get_attribute('data-original-title') or elem.text)
-                    for elem in d.find_elements(By.CSS_SELECTOR, ".deck-table-row__price [data-original-title]")
-                    if float(re.search(r'€(\d+\.\d{2})', elem.get_attribute('data-original-title') or elem.text).group(1)) > 0
-                    if re.search(r'€(\d+\.\d{2})', elem.get_attribute('data-original-title') or elem.text)
-                ) or True  # Fallback si no hay, solo espera 1s mínimo
-            )
+            # FIX: Chequeo con JS evaluate para serializable
+            def check_non_zero_in_tooltip():
+                return page.evaluate("""
+                    () => {
+                        const tooltips = document.querySelectorAll('.deck-table-row__price [data-original-title]');
+                        return Array.from(tooltips).some(el => {
+                            const title = el.getAttribute('data-original-title') || el.textContent;
+                            const match = title.match(/€(\\d+\\.\\d{2})/);
+                            return match && parseFloat(match[1]) > 0;
+                        });
+                    }
+                """)
+            
+            page.wait_for_function(check_non_zero_in_tooltip, timeout=5000)
             print("[DEBUG] Tooltips/precios estabilizados.")
-            random_delay(1, 2)  # Pausa humana post-hover (gaussiano)
-        except TimeoutException:
-            print("[WARNING] Elemento '.card.mx-auto.card-featured' no encontrado o timeout en hover. Continuando...")
+            random_delay(1, 2)
         except Exception as hover_err:
-            print(f"[ERROR] Error en hover: {hover_err}")
+            print(f"[WARNING] Hover timeout o error: {hover_err}. Continuando...")
 
-        # REEMPLAZO: Eliminamos sleep(5); la siguiente wait lo cubre
+        # Click en botón optimize si enabled
         print("[DEBUG] Buscando botón '.btn.btn-success'...")
         try:
-            optimize_button = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".btn.btn-success")))
-            is_enabled = optimize_button.is_enabled()
-            print(f"[DEBUG] Botón encontrado. ¿Enabled? {is_enabled}")
-            
-            if is_enabled:
-                print("[DEBUG] Botón enabled: Click en él...")
-                optimize_button.click()
+            button_locator = page.locator('.btn.btn-success')
+            button_locator.wait_for(state='visible', timeout=10000)
+            if button_locator.is_enabled():
+                print("[DEBUG] Botón enabled: Click...")
+                button_locator.click()
                 print("[DEBUG] Click realizado. Esperando precios actualizados (máx 30s)...")
                 
-                # REEMPLAZO: Wait dinámica para al menos un precio no cero (en vez de sleep(10))
-                def has_non_zero_price(driver):
-                    page_text = driver.page_source
-                    soup_temp = BeautifulSoup(page_text, 'html.parser')
-                    container_temp = soup_temp.select_one('.deck-table-rows')
-                    if container_temp:
-                        rows_temp = container_temp.select('.deck-table-row')
-                        for row_temp in rows_temp[:5]:  # Chequea solo primeras 5 para velocidad
-                            # Chequea precio principal
-                            price_div_temp = row_temp.select_one('.deck-table-row__price .row .col')
-                            if price_div_temp:
-                                cell_text_temp = price_div_temp.get_text(strip=True)
-                                match_temp = re.search(r'€(\d+\.\d{2})', cell_text_temp)
-                                if match_temp and float(match_temp.group(1)) > 0:
-                                    return True
-                            # Fallback tooltip
-                            tooltip_row_temp = row_temp.select_one('.deck-table-row__price .row[data-original-title]')
-                            if tooltip_row_temp:
-                                tooltip_temp = tooltip_row_temp.get('data-original-title', '')
-                                match_temp = re.search(r'€(\d+\.\d{2})', tooltip_temp)
-                                if match_temp and float(match_temp.group(1)) > 0:
-                                    return True
-                    return False
+                # FIX: has_non_zero_price con JS evaluate
+                def has_non_zero_price():
+                    return page.evaluate("""
+                        () => {
+                            const rows = document.querySelectorAll('.deck-table-row');
+                            for (let row of rows.slice(0, 5)) {
+                                const priceEl = row.querySelector('.deck-table-row__price .row .col');
+                                if (priceEl) {
+                                    const text = priceEl.textContent;
+                                    const match = text.match(/€(\\d+\\.\\d{2})/);
+                                    if (match && parseFloat(match[1]) > 0) return true;
+                                }
+                                const tooltipEl = row.querySelector('.deck-table-row__price .row[data-original-title]');
+                                if (tooltipEl) {
+                                    const title = tooltipEl.getAttribute('data-original-title');
+                                    const match = title.match(/€(\\d+\\.\\d{2})/);
+                                    if (match && parseFloat(match[1]) > 0) return true;
+                                }
+                            }
+                            return false;
+                        }
+                    """)
                 
-                try:
-                    WebDriverWait(driver, 30).until(has_non_zero_price)
-                    print("[DEBUG] Al menos un precio no cero detectado después del click.")
-                except TimeoutException:
-                    print("[WARNING] No se detectaron precios no cero en 30s después del click. Continuando...")
+                # Wait para al menos un precio >0
+                page.wait_for_function(has_non_zero_price, timeout=30000)
+                print("[DEBUG] Precios no cero detectados post-click.")
             else:
-                print("[DEBUG] Botón disabled: Esperando que carguen los precios...")
-                random_delay(min_sec=3, max_sec=6)  # Delay extra si disabled (gaussiano)
-            
-            # REEMPLAZO: Loop de polling más eficiente (random 1.5-3s en vez de 2s fijo, máx 90s total)
-            print("[DEBUG] Verificando precios no cero en tabla (máx 90s, poll random 1.5-3s)...")
+                print("[DEBUG] Botón disabled: Esperando...")
+                random_delay(min_sec=3, max_sec=6)
+                
+            # Polling si no hay precios aún (gaussiano)
+            print("[DEBUG] Verificando precios (máx 90s, poll 1.5-3s)...")
             max_wait = 90
             waited = 0
-            has_non_zero = has_non_zero_price(driver)  # Chequeo inicial
-            while waited < max_wait and not has_non_zero:
-                random_delay(min_sec=1.5, max_sec=3)  # Poll gaussiano corto
-                waited += random.uniform(1.5, 3)  # Aprox para acumular (usa uniform para simplicidad)
-                has_non_zero = has_non_zero_price(driver)
-            if has_non_zero:
-                print(f"[DEBUG] Precios no cero OK en ~{waited:.1f}s.")
+            while waited < max_wait and not has_non_zero_price():
+                random_delay(min_sec=1.5, max_sec=3)
+                waited += random.uniform(1.5, 3)  # Aprox acumulado
+            if has_non_zero_price():
+                print(f"[DEBUG] Precios OK en ~{waited:.1f}s.")
             else:
-                print("[WARNING] Timeout esperando precios no cero. Continuando con lo disponible.")
+                print("[WARNING] Timeout en precios.")
                 
-        except TimeoutException:
-            print("[WARNING] Botón '.btn.btn-success' no encontrado. Continuando sin optimizar...")
         except Exception as btn_err:
-            print(f"[ERROR] Error con botón: {btn_err}")
+            print(f"[WARNING] Botón no encontrado o error: {btn_err}")
 
-        # Extrae con estructura específica de divs (simple, sin extras)
-        print("[DEBUG] Extrayendo cartas con estructura de divs...")
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        # Extrae con BS4 (igual que antes)
+        print("[DEBUG] Extrayendo cartas...")
+        soup = BeautifulSoup(page.content(), 'html.parser')
         
-        # Limpia elementos no deseados
+        # Limpia no deseados
         for unwanted in soup.find_all(['footer', 'header', 'nav', '.site-footer', 'aside']):
             unwanted.decompose()
         
-        # Busca contenedor de rows
         container = soup.select_one('.deck-table-rows')
         if not container:
-            print("[ERROR] No .deck-table-rows encontrada. Guardando HTML para debug...")
+            print("[ERROR] No contenedor. Guardando debug.html...")
             with open('debug.html', 'w', encoding='utf-8') as f:
                 f.write(soup.prettify())
-            print("HTML guardado en 'debug.html'. Revisa manualmente.")
             return soup.get_text(separator='\n', strip=True)
         
-        print(f"[DEBUG] Contenedor encontrado con {len(container.select('.deck-table-row'))} rows.")
+        print(f"[DEBUG] {len(container.select('.deck-table-row'))} rows encontradas.")
         
         texto = ""
         rows = container.select('.deck-table-row')
         for row in rows:
-            # Extrae nombre del .deck-table-row__name
             name_div = row.select_one('.deck-table-row__name span')
             if not name_div:
                 continue
@@ -214,15 +211,12 @@ def scrape_wishlist(url):
             if len(nombre) < 3 or not re.match(r'^[A-Z]', nombre):
                 continue
             
-            # Filtra no-cartas
             if any(word in nombre.lower() for word in ['sesión', 'zero', 'comprar', 'ahora', 'cerrar', 'cardtrader', 'box', 'tin', 'mazzi', 'bustine', 'dadi', 'tapetes']):
                 continue
             
-            # Bloques placeholder (simple)
             texto += f"{nombre}\n"
             texto += "Indiferente\nIndiferenteEN+ESDEENESFRITJPPTZH-CN\nIndiferenteNear MintSlightly PlayedModerately PlayedPlayedPoor\nIndiferenteSíNo\n"
             
-            # Extrae precio del .deck-table-row__price
             price_div = row.select_one('.deck-table-row__price .row .col')
             precio = '€0.00'
             if price_div:
@@ -240,22 +234,26 @@ def scrape_wishlist(url):
             
             texto += f"{precio}\n\n"
             if precio != '€0.00':
-                print(f"[DEBUG] Carta extraída: {nombre} | {precio}")
+                print(f"[DEBUG] Carta: {nombre} | {precio}")
             else:
-                print(f"[WARNING] Precio cero para {nombre} - posiblemente no cargado.")
+                print(f"[WARNING] Precio cero: {nombre}")
         
         if not texto.strip():
             texto = soup.get_text(separator='\n', strip=True)
-            print("[DEBUG] Fallback a texto completo.")
+            print("[DEBUG] Fallback texto completo.")
         
-        print(f"[DEBUG] Texto final: {len(texto)} chars. Primeras 300: {texto[:300]}...")
+        print(f"[DEBUG] Texto final: {len(texto)} chars.")
         return texto
         
     except Exception as e:
-        print(f"[ERROR] Scrape: {e}")
+        print(f"[ERROR] Scrape Playwright: {e}")
         return None
     finally:
-        if driver:
-            random_delay(1, 3)  # Delay final antes de cerrar (gaussiano)
-            driver.quit()
-            print("[DEBUG] Chrome cerrado.")
+        if page:
+            random_delay(1, 3)  # Final gaussiano
+            context.close()  # Cierra contexto persistente
+        if browser:
+            browser.close()
+        if playwright:
+            playwright.stop()
+        print("[DEBUG] Playwright cerrado.")
