@@ -6,6 +6,12 @@ import pandas as pd  # Para filtrar DataFrame
 import random  # Para gaussiana en interval
 from dotenv import load_dotenv
 
+# Cargar .env (incluye DEBUG_MODE)
+load_dotenv()
+
+# Flag de debug con modos
+DEBUG_MODE = os.getenv('DEBUG_MODE', 'off').lower()
+
 # Imports modulares
 from config import load_config  # Ya no llamamos aquí; se auto-carga en config/__init__.py
 from db.handler import inicializar_bd, guardar_historial, analizar_ejemplo, get_significant_price_changes
@@ -18,13 +24,17 @@ from utils.telegram import send_telegram_message
 
 inicializar_bd()  # Inicializa BD con nuevo schema (UNIQUE, DATETIME)
 
+# Import para umbral (disponible post-auto-carga)
+from config import PRICE_DROP_THRESHOLD
+
 def procesar_wishlist(wishlist_id):
     """
     Procesa una wishlist individual.
     """
     url = f"https://www.cardtrader.com/wishlists/{wishlist_id}"
     print(f"\n=== Procesando Wishlist {wishlist_id} ===")
-    print(f"[DEBUG] URL: {url}")
+    if DEBUG_MODE == 'debug':
+        print(f"[DEBUG] URL: {url}")
     
     texto = scrape_wishlist(url)
     if texto:
@@ -36,7 +46,8 @@ def procesar_wishlist(wishlist_id):
     if not texto:
         return 0
     
-    print("[DEBUG] Parse...")
+    if DEBUG_MODE == 'debug':
+        print("[DEBUG] Parse...")
     cartas = parsear_cartas(texto)
     total_cartas = len(cartas)
     if cartas:
@@ -46,25 +57,36 @@ def procesar_wishlist(wishlist_id):
         if len(cartas) > 10:
             print(f"  ... +{len(cartas)-10}.")
         
+        # Nombres actuales para filtro en stats
+        current_names = [c['Nombre'] for c in cartas]
+        
         inserted = guardar_historial(cartas, wishlist_id=wishlist_id)
         
-        # Chequea cambios y alerta si hay
-        cambios = get_significant_price_changes(threshold=0.05)
-        cambios_wishlist = cambios[cambios['wishlist_id'] == wishlist_id] if not cambios.empty else pd.DataFrame()
+        # Chequea bajadas y alerta si hay (solo última iteración)
+        cambios = get_significant_price_changes()
+        cambios_wishlist = cambios[cambios['wishlist_id'] == int(wishlist_id)] if not cambios.empty else pd.DataFrame()
         if not cambios_wishlist.empty:
-            mensaje = f"¡Cambios significativos en wishlist {wishlist_id} (>€0.05)!\n\n{cambios_wishlist.to_string(index=False)}"
-            print("[DEBUG] ¡Intentando enviar Telegram detallado!")  # DEBUG
+            if DEBUG_MODE == 'debug':
+                print("[DEBUG] ¡Intentando enviar Telegram detallado!")
+            mensaje = f"¡Bajadas significativas en wishlist {wishlist_id} (<Q1 o >{PRICE_DROP_THRESHOLD*100:.0f}%, última iteración)!\n\n"
+            for _, row in cambios_wishlist.iterrows():
+                pct_str = f" (bajada {row['pct_drop']*100:.1f}%)" if row['pct_drop'] > PRICE_DROP_THRESHOLD else ""
+                mensaje += f"• {row['nombre']}: Actual €{row['precio']:.2f}{pct_str}, Q1 €{row['q1_precio']:.2f}, Min €{row['min_precio']:.2f}, Max €{row['max_precio']:.2f}\n"
             send_telegram_message(mensaje)
-            print(f"[DEBUG] Enviado Telegram con {len(cambios_wishlist)} cambios para {wishlist_id}.")
+            if DEBUG_MODE == 'debug':
+                print(f"[DEBUG] Enviado Telegram con {len(cambios_wishlist)} bajadas para {wishlist_id}.")
         else:
-            print("[DEBUG] Sin cambios >0.05€ en esta wishlist. Skip Telegram detallado.")
+            if DEBUG_MODE == 'debug':
+                print(f"[DEBUG] Sin bajadas significativas en esta wishlist (última iteración). Skip Telegram detallado.")
         
-        analizar_ejemplo(inserted)  # Pasa el count de inserts para export condicional
+        # Pasa nombres actuales para filtro en stats (prioridad sobre wishlist_id)
+        analizar_ejemplo(inserted, current_names=current_names)
         generar_html_stats()  # Genera el HTML actualizado
     else:
         print("No válidas. Revisa si los precios se cargaron (busca €0.00 en el log).")
         total_cartas = 0
-        analizar_ejemplo(0)  # No inserts, pero llama para stats (skip export)
+        analizar_ejemplo(0, current_names=[])  # Skip stats si no hay cartas
+        generar_html_stats()
     
     return total_cartas
 
@@ -75,14 +97,19 @@ if __name__ == "__main__":
     if wishlist_id:
         # Modo single
         num_cartas = procesar_wishlist(wishlist_id)
-        # Mensaje de cierre SIEMPRE
-        print("[DEBUG] ¡Intentando enviar resumen single!")  # DEBUG
-        cambios = get_significant_price_changes(threshold=0.05)
+        # Mensaje de cierre SIEMPRE con detalles si hay bajadas
+        if DEBUG_MODE == 'debug':
+            print("[DEBUG] ¡Intentando enviar resumen single!")
+        cambios = get_significant_price_changes()
         cambios_wishlist = cambios[cambios['wishlist_id'] == int(wishlist_id)] if not cambios.empty else pd.DataFrame()
         if not cambios_wishlist.empty:
-            send_telegram_message(f"Scraping completado para wishlist {wishlist_id}. {len(cambios_wishlist)} cambios detectados.")
+            mensaje = f"Scraping completado para wishlist {wishlist_id}. {len(cambios_wishlist)} bajadas en última iteración.\n\nDetalles:\n"
+            for _, row in cambios_wishlist.iterrows():
+                pct_str = f" (bajada {row['pct_drop']*100:.1f}%)" if row['pct_drop'] > PRICE_DROP_THRESHOLD else ""
+                mensaje += f"• {row['nombre']}: Actual €{row['precio']:.2f}{pct_str}, Q1 €{row['q1_precio']:.2f}, Min €{row['min_precio']:.2f}, Max €{row['max_precio']:.2f}\n"
+            send_telegram_message(mensaje)
         else:
-            send_telegram_message(f"Scraping completado para wishlist {wishlist_id}. Cartas: {num_cartas}. Sin cambios significativos.")
+            send_telegram_message(f"Scraping completado para wishlist {wishlist_id}. Cartas: {num_cartas}. Sin bajadas significativas en última iteración.")
     else:
         # Modo batch: lee de wishlists.txt con soporte para comentarios (#)
         wishlist_file = 'wishlists.txt'
@@ -97,11 +124,12 @@ if __name__ == "__main__":
             print("[ERROR] No hay IDs válidos en el archivo (ignora líneas con # para comentarios).")
             sys.exit(1)
         
-        # Usa config para interval gaussiano (ya disponible por auto-load)
-        from config import INTERVAL_MIN_MIN, INTERVAL_MAX_MIN, INTERVAL_MEAN_MIN, INTERVAL_STD_MIN
+        # Usa config para interval gaussiano y umbral (ya disponible por auto-load)
+        from config import INTERVAL_MIN_MIN, INTERVAL_MAX_MIN, INTERVAL_MEAN_MIN, INTERVAL_STD_MIN, PRICE_DROP_THRESHOLD
         
         while True:
-            print(f"[INFO] Procesando {len(ids)} wishlists de {wishlist_file}...")
+            if DEBUG_MODE in ['info', 'debug']:
+                print(f"[INFO] Procesando {len(ids)} wishlists de {wishlist_file}...")
             total_cartas_global = 0
             for idx, wid in enumerate(ids, 1):
                 print(f"\n--- {idx}/{len(ids)} ---")
@@ -109,15 +137,20 @@ if __name__ == "__main__":
                 total_cartas_global += cartas_procesadas
                 print(f"Cartas procesadas en esta wishlist: {cartas_procesadas}")
             
-            # Mensaje de cierre SIEMPRE en batch
-            print("[DEBUG] ¡Intentando enviar resumen batch!")  # DEBUG
-            cambios_global = get_significant_price_changes(threshold=0.05)
+            # Mensaje de cierre SIEMPRE en batch con detalles
+            if DEBUG_MODE == 'debug':
+                print("[DEBUG] ¡Intentando enviar resumen batch!")
+            cambios_global = get_significant_price_changes()
             if not cambios_global.empty:
-                print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. {len(cambios_global)} cambios globales detectados.")
-                send_telegram_message(f"Scraping batch completado! Total cartas: {total_cartas_global}. {len(cambios_global)} cambios significativos en total.")
+                mensaje = f"Scraping batch completado! Total cartas: {total_cartas_global}. {len(cambios_global)} bajadas significativas en última iteración (<Q1 o >{PRICE_DROP_THRESHOLD*100:.0f}%).\n\nDetalles:\n"
+                for _, row in cambios_global.iterrows():
+                    pct_str = f" (bajada {row['pct_drop']*100:.1f}%)" if row['pct_drop'] > PRICE_DROP_THRESHOLD else ""
+                    mensaje += f"• {row['nombre']} (wishlist {row['wishlist_id']}): Actual €{row['precio']:.2f}{pct_str}, Q1 €{row['q1_precio']:.2f}, Min €{row['min_precio']:.2f}, Max €{row['max_precio']:.2f}\n"
+                send_telegram_message(mensaje)
+                print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. {len(cambios_global)} bajadas globales en última iteración.")
             else:
-                print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. Sin cambios significativos.")
-                send_telegram_message(f"Batch completado sin cambios. Total cartas procesadas: {total_cartas_global}.")
+                print(f"\n¡Proceso completado! Total cartas procesadas: {total_cartas_global}. Sin bajadas significativas.")
+                send_telegram_message(f"Batch completado sin bajadas en última iteración. Total cartas procesadas: {total_cartas_global}.")
             
             # Intervalo gaussiano truncado
             interval_min = INTERVAL_MIN_MIN * 60  # En segundos
@@ -128,5 +161,6 @@ if __name__ == "__main__":
             delay_interval = random.gauss(interval_mean, interval_std)
             delay_interval = max(interval_min, min(delay_interval, interval_max))
             
-            print(f"[INFO] Esperando intervalo gaussiano: ~{delay_interval / 60:.1f} minutos antes de siguiente ciclo...")
+            if DEBUG_MODE in ['info', 'debug']:
+                print(f"[INFO] Esperando intervalo gaussiano: ~{delay_interval / 60:.1f} minutos antes de siguiente ciclo...")
             time.sleep(delay_interval)

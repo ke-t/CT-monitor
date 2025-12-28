@@ -1,53 +1,65 @@
 import requests
 import os
-import time
+from dotenv import load_dotenv
 
-def send_telegram_message(message):
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT = os.getenv('TELEGRAM_CHAT')
+PARSE_MODE = os.getenv('PARSE_MODE', 'HTML')  # Default HTML
+
+def send_telegram_message(text, max_length=4096):
     """
-    Envía un mensaje a Telegram con manejo de errores, truncado y parse mode opcional.
+    Envía mensaje a Telegram con truncado si > max_length.
+    - Trunca inteligentemente (última viñeta) y agrega "..." si necesario.
+    - Maneja errores 400 con fallback corto.
     """
-    if not message or not isinstance(message, str):
-        print("[WARNING] Mensaje inválido (vacío o no string). No se envía.")
-        return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
+        print("[ERROR] TELEGRAM_TOKEN o CHAT faltantes en .env.")
+        return False
 
-    token = os.getenv('TELEGRAM_TOKEN')
-    chat_id = os.getenv('TELEGRAM_CHAT')
-    parse_mode = os.getenv('TELEGRAM_PARSE_MODE')  # e.g., 'HTML' o 'Markdown'
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    if not token or not chat_id:
-        print("[WARNING] Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT en .env.")
-        return
+    # Truncado inteligente
+    if len(text) > max_length:
+        # Busca última \n\n (viñeta) y corta ahí
+        last_bullet = text.rfind('\n\n• ')
+        if last_bullet > 0:
+            truncated = text[:last_bullet + 2] + "... (mensaje truncado; más detalles en logs)"
+        else:
+            truncated = text[:max_length - 50] + "... (truncado)"
+        print(f"[WARNING] Mensaje truncado de {len(text)} a {len(truncated)} chars.")
+        text = truncated
 
-    # Truncar si excede 4096 chars
-    if len(message) > 4096:
-        message = message[:4093] + "..."
-        print(f"[INFO] Mensaje truncado a 4096 chars.")
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = {
-        "chat_id": chat_id,
-        "text": message
+    payload = {
+        'chat_id': TELEGRAM_CHAT,
+        'text': text,
+        'parse_mode': PARSE_MODE
     }
-    if parse_mode:
-        data["parse_mode"] = parse_mode
 
     try:
-        response = requests.post(url, data=data, timeout=10)
-        response.raise_for_status()  # Lanza excepción para 4xx/5xx
-
-        json_response = response.json()
-        if json_response.get('ok'):
-            print("[INFO] Mensaje Telegram enviado exitosamente.")
+        response = requests.post(url, data=payload, timeout=10)
+        response.raise_for_status()
+        print("[INFO] Mensaje Telegram enviado OK.")
+        return True
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 400:
+            print(f"[ERROR] Telegram 400 Bad Request: {response.json().get('description', 'Desconocido')}")
+            # Fallback: Envía versión corta
+            short_msg = f"Resumen scraping: {text[:200]}..." if len(text) > 200 else text
+            fallback_payload = {'chat_id': TELEGRAM_CHAT, 'text': short_msg}
+            try:
+                requests.post(url, data=fallback_payload, timeout=10)
+                print("[INFO] Fallback corto enviado.")
+            except:
+                pass
         else:
-            error_msg = json_response.get('description', 'Error desconocido')
-            print(f"[ERROR] Fallo en Telegram API: {error_msg}")
-            if 'rate' in error_msg.lower():  # Detección básica de rate limit
-                print("[INFO] Rate limit detectado. Esperando 60s...")
-                time.sleep(60)
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Error de red en Telegram: {e}")
+            print(f"[ERROR] HTTP {response.status_code}: {e}")
+        return False
     except Exception as e:
-        print(f"[ERROR] Error inesperado en Telegram: {e}")
+        print(f"[ERROR] Error en Telegram: {e}")
+        return False
 
-    # Sleep básico para rate limiting (ajustable)
-    time.sleep(2)
+# Sleep rate limit (1s entre envíos)
+import time
+time.sleep(1)

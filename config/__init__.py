@@ -59,12 +59,20 @@ def load_config():
     if INTERVAL_MEAN_MIN < INTERVAL_MIN_MIN or INTERVAL_MEAN_MIN > INTERVAL_MAX_MIN:
         raise ValueError("INTERVAL_MEAN_MIN debe estar entre MIN y MAX")
     
+    # Umbral para bajada significativa (% como decimal, e.g., 0.20 = 20%)
+    global PRICE_DROP_THRESHOLD
+    PRICE_DROP_THRESHOLD = float(os.getenv('PRICE_DROP_THRESHOLD', 0.20))
+    if PRICE_DROP_THRESHOLD <= 0 or PRICE_DROP_THRESHOLD > 1:
+        raise ValueError("PRICE_DROP_THRESHOLD debe ser >0 y <=1 (e.g., 0.20 para 20%)")
+    
     # Legacy (ignorado)
     os.getenv('INTERVAL_MINUTES', 60)  # Solo para compatibilidad, no usar
     
     print(f"[INFO] Configuración cargada y validada correctamente. {len(required_vars)} vars requeridas OK.")
     print(f"[CONFIG] Delays scraping: Min={DELAY_MIN_SEC}s, Max={DELAY_MAX_SEC}s, Media={DELAY_MEAN_SEC}s, Std={DELAY_STD_SEC}s")
     print(f"[CONFIG] Intervalos batch: Min={INTERVAL_MIN_MIN}min, Max={INTERVAL_MAX_MIN}min, Media={INTERVAL_MEAN_MIN}min, Std={INTERVAL_STD_MIN}min")
+    if PRICE_DROP_THRESHOLD != 0.20:
+        print(f"[CONFIG] Umbral bajada significativa: {PRICE_DROP_THRESHOLD*100:.0f}% (custom)")
     
     # Exporta globals para uso en otros módulos (disponibles post-load)
     globals().update(locals())
