@@ -9,11 +9,7 @@ TELEGRAM_CHAT = os.getenv('TELEGRAM_CHAT')
 PARSE_MODE = os.getenv('PARSE_MODE', 'HTML')  # Default HTML
 
 def send_telegram_message(text, max_length=4096):
-    """
-    Envía mensaje a Telegram con truncado si > max_length.
-    - Trunca inteligentemente (última viñeta) y agrega "..." si necesario.
-    - Maneja errores 400 con fallback corto.
-    """
+
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
         print("[ERROR] TELEGRAM_TOKEN o CHAT faltantes en .env.")
         return False
@@ -46,8 +42,8 @@ def send_telegram_message(text, max_length=4096):
         if response.status_code == 400:
             print(f"[ERROR] Telegram 400 Bad Request: {response.json().get('description', 'Desconocido')}")
             # Fallback: Envía versión corta
-            short_msg = f"Resumen scraping: {text[:200]}..." if len(text) > 200 else text
-            fallback_payload = {'chat_id': TELEGRAM_CHAT, 'text': short_msg}
+            # short_msg = f"Resumen scraping: {text[:200]}..." if len(text) > 200 else text
+            fallback_payload = {'chat_id': TELEGRAM_CHAT, 'text': text}
             try:
                 requests.post(url, data=fallback_payload, timeout=10)
                 print("[INFO] Fallback corto enviado.")
